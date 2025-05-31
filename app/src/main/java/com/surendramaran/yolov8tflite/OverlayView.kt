@@ -21,17 +21,22 @@ class OverlayView(context: Context?, attrs: AttributeSet?) : View(context, attrs
 
     private var bounds = Rect()
 
+    private var sourceImageWidth: Float = 1f
+    private var sourceImageHeight: Float = 1f
+
     init {
         initPaints()
     }
 
     fun clear() {
         results = listOf()
-        textPaint.reset()
-        textBackgroundPaint.reset()
-        boxPaint.reset()
+        sourceImageWidth = 1f // Reset juga
+        sourceImageHeight = 1f // Reset juga
+        // textPaint.reset() // Sebaiknya initPaints dipanggil ulang saja
+        // textBackgroundPaint.reset()
+        // boxPaint.reset()
         invalidate()
-        initPaints()
+        initPaints() // Panggil ulang untuk memastikan paint terinisialisasi dengan benar
     }
 
     private fun initPaints() {
@@ -51,33 +56,67 @@ class OverlayView(context: Context?, attrs: AttributeSet?) : View(context, attrs
     override fun draw(canvas: Canvas) {
         super.draw(canvas)
 
-        results.forEach {
-            val left = it.x1 * width
-            val top = it.y1 * height
-            val right = it.x2 * width
-            val bottom = it.y2 * height
+        // Hindari pembagian dengan nol atau penskalaan salah jika dimensi belum di-set
+        if (sourceImageWidth <= 1f || sourceImageHeight <= 1f || results.isEmpty()) {
+            return
+        }
 
-            canvas.drawRect(left, top, right, bottom, boxPaint)
-            val drawableText = it.clsName
+        // Faktor skala dari koordinat gambar asli ke koordinat OverlayView
+        val scaleX = width.toFloat() / sourceImageWidth     // width adalah OverlayView.width
+        val scaleY = height.toFloat() / sourceImageHeight   // height adalah OverlayView.height
+
+        results.forEach { box ->
+            // box.x1, box.y1, dll. adalah koordinat piksel di gambar ASLI
+
+            // Skalakan koordinat ke ruang OverlayView
+            val displayLeft = box.x1 * scaleX
+            val displayTop = box.y1 * scaleY
+            val displayRight = box.x2 * scaleX
+            val displayBottom = box.y2 * scaleY
+
+            // Gambar persegi panjang dengan koordinat yang sudah diskalakan
+            // Canvas akan secara otomatis meng-clip bagian yang di luar batasnya
+            canvas.drawRect(displayLeft, displayTop, displayRight, displayBottom, boxPaint)
+
+            val drawableText = box.clsName // Pastikan BoundingBox punya clsName
+            // Jika menggunakan properti `cls` (int) dan `labels` list dari Detector,
+            // Anda mungkin perlu cara untuk mendapatkan nama kelas di sini.
+            // Untuk sementara, asumsikan `box.clsName` sudah benar.
 
             textBackgroundPaint.getTextBounds(drawableText, 0, drawableText.length, bounds)
             val textWidth = bounds.width()
-            val textHeight = bounds.height()
+            val textRectHeight = bounds.height() // Tinggi actual dari teks dirender
+
+            // Tentukan posisi teks (misalnya di pojok kiri atas bounding box)
+            // Pastikan teks juga menggunakan koordinat yang sudah diskalakan
+            val textDrawX = displayLeft
+            val textDrawY = displayTop // Ini akan jadi batas atas background teks
+
+            // Background untuk teks
             canvas.drawRect(
-                left,
-                top,
-                left + textWidth + BOUNDING_RECT_TEXT_PADDING,
-                top + textHeight + BOUNDING_RECT_TEXT_PADDING,
+                textDrawX,
+                textDrawY,
+                textDrawX + textWidth + BOUNDING_RECT_TEXT_PADDING,
+                textDrawY + textRectHeight + BOUNDING_RECT_TEXT_PADDING,
                 textBackgroundPaint
             )
-            canvas.drawText(drawableText, left, top + bounds.height(), textPaint)
 
+            // Teks di atas background
+            // textDrawY + textRectHeight adalah baseline untuk drawText jika textDrawY adalah y-atas
+            canvas.drawText(drawableText, textDrawX + (BOUNDING_RECT_TEXT_PADDING / 2f), textDrawY + textRectHeight + (BOUNDING_RECT_TEXT_PADDING / 2f) - bounds.bottom, textPaint)
+            // Penyesuaian bounds.bottom mungkin diperlukan untuk alignment vertikal yang lebih baik dalam background
+            // Atau lebih sederhana:
+            // canvas.drawText(drawableText, textDrawX, textDrawY + textRectHeight, textPaint)
+            // Ini menempatkan baseline teks di bagian bawah area background. Sesuaikan padding jika perlu.
         }
     }
 
-    fun setResults(boundingBoxes: List<BoundingBox>) {
+    // Modifikasi setResults untuk menerima dimensi gambar asli
+    fun setResults(boundingBoxes: List<BoundingBox>, originalImgWidth: Int, originalImgHeight: Int) {
         results = boundingBoxes
-        invalidate()
+        this.sourceImageWidth = originalImgWidth.toFloat()
+        this.sourceImageHeight = originalImgHeight.toFloat()
+        invalidate() // Minta OverlayView untuk menggambar ulang
     }
 
     companion object {
