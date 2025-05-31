@@ -35,7 +35,7 @@ class Detector(
 
     interface DetectorListener {
         fun onEmptyDetect()
-        fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long)
+        fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long, originalImageWidth: Int, originalImageHeight: Int)
     }
 
     init {
@@ -163,7 +163,7 @@ class Detector(
             if (boundingBoxes.isEmpty()) {
                 detectorListener.onEmptyDetect()
             } else {
-                detectorListener.onDetect(boundingBoxes, inferenceTime)
+                detectorListener.onDetect(boundingBoxes, inferenceTime, bitmap.width, bitmap.height)
             }
 
         } catch (e: Exception) {
