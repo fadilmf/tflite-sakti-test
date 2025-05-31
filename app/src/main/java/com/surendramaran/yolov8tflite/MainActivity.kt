@@ -163,6 +163,11 @@ class MainActivity : AppCompatActivity(), Detector.DetectorListener {
                         // Convert ImageProxy to Bitmap
                         val bitmap = imageProxyToBitmap(image)
 
+                        Log.d("ImageCapture", "Original image resolution: ${image.width} x ${image.height}")
+                        Log.d("ImageCapture", "Converted bitmap resolution: ${bitmap.width} x ${bitmap.height}")
+                        Log.d("ImageCapture", "Image format: ${image.format}")
+                        Log.d("ImageCapture", "Image rotation: ${image.imageInfo.rotationDegrees}°")
+
                         // Process detection on background thread
                         cameraExecutor.execute {
                             try {
@@ -324,6 +329,16 @@ class MainActivity : AppCompatActivity(), Detector.DetectorListener {
             binding.overlay.apply {
                 setResults(boundingBoxes)
                 invalidate()
+            }
+            Log.d("boundingBox", "Total detections: ${boundingBoxes.size}")
+            boundingBoxes.forEachIndexed { index, box ->
+                Log.d("boundingBox", "Detection $index:")
+                Log.d("boundingBox", "  Class: ${box.clsName} (${box.cls})")
+                Log.d("boundingBox", "  Confidence: ${box.cnf}")
+                Log.d("boundingBox", "  Coordinates: x1=${box.x1}, y1=${box.y1}, x2=${box.x2}, y2=${box.y2}")
+                Log.d("boundingBox", "  Center: cx=${box.cx}, cy=${box.cy}")
+                Log.d("boundingBox", "  Size: w=${box.w}, h=${box.h}")
+                Log.d("boundingBox", "  ----")
             }
             binding.captureButton.text = "RESET"
             binding.retakeButton.visibility = View.VISIBLE

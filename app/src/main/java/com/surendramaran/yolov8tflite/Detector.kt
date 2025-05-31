@@ -214,10 +214,24 @@ class Detector(
                     val width = detection[2] * originalWidth
                     val height = detection[3] * originalHeight
 
-                    val left = centerX - width / 2
-                    val top = centerY - height / 2
-                    val right = centerX + width / 2
-                    val bottom = centerY + height / 2
+                    Log.d("boundingBox", "ini originalWidth: ${originalWidth} originalHeight: ${originalHeight}")
+                    Log.d("boundingBox", "ini width: ${width} height: ${height}")
+
+                    var left = centerX - originalWidth / 2
+                    var top = centerY - originalHeight / 2
+                    var right = centerX + originalWidth / 2
+                    var bottom = centerY + originalHeight / 2
+
+                    left = left.coerceIn(0f, originalWidth.toFloat())
+                    top = top.coerceIn(0f, originalHeight.toFloat())
+                    right = right.coerceIn(0f, originalWidth.toFloat())
+                    bottom = bottom.coerceIn(0f, originalHeight.toFloat())
+
+                    // Opsional: Jika setelah clipping, lebar atau tinggi menjadi <= 0, abaikan deteksi ini
+                    if (right <= left || bottom <= top) {
+                         Log.d(TAG, "Detection $i discarded after clipping (zero or negative size)")
+                        continue
+                    }
 
                     val classIndex = if (detection.size > 5) {
                         // Multi-class: find class with highest probability
