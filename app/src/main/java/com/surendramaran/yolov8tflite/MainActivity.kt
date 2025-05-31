@@ -322,12 +322,12 @@ class MainActivity : AppCompatActivity(), Detector.DetectorListener {
         }
     }
 
-    override fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long) {
+    override fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long, originalImageWidth: Int, originalImageHeight: Int) {
         runOnUiThread {
             isDetectionMode = true
             binding.inferenceTime.text = "${inferenceTime}ms"
             binding.overlay.apply {
-                setResults(boundingBoxes)
+                setResults(boundingBoxes, originalImageWidth, originalImageHeight)
                 invalidate()
             }
             Log.d("boundingBox", "Total detections: ${boundingBoxes.size}")
@@ -347,6 +347,9 @@ class MainActivity : AppCompatActivity(), Detector.DetectorListener {
             binding.resultText.text = "Detected ${boundingBoxes.size} object(s)"
             binding.captureButton.isEnabled = true
             binding.progressBar.visibility = View.GONE
+            Log.d(TAG, "Original image for Overlay: ${originalImageWidth}x${originalImageHeight}")
+            for (box in boundingBoxes) {
+                Log.d(TAG, "  Overlay Input Box: Label=${box.clsName}, Coords=[${box.x1}, ${box.y1}, ${box.x2}, ${box.y2}]")
         }
     }
 }
