@@ -2,30 +2,23 @@ package com.surendramaran.yolov8tflite
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.os.SystemClock
-import org.tensorflow.lite.DataType
+import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.FileUtil
-import org.tensorflow.lite.support.common.ops.CastOp
-import org.tensorflow.lite.support.common.ops.NormalizeOp
-import org.tensorflow.lite.support.image.ImageProcessor
-import org.tensorflow.lite.support.image.TensorImage
-import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
-import java.io.BufferedReader
-import java.io.IOException
-import java.io.InputStream
-import java.io.InputStreamReader
+import java.io.FileInputStream
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 
 class Detector(
     private val context: Context,
     private val modelPath: String,
     private val labelPath: String,
-    private val detectorListener: DetectorListener,
+    private val detectorListener: DetectorListener
 ) {
-
-    private var interpreter: Interpreter
+    private var interpreter: Interpreter? = null
+    private var gpuDelegate: GpuDelegate? = null
     private var labels = mutableListOf<String>()
 
     private var tensorWidth = 0
@@ -33,197 +26,11 @@ class Detector(
     private var numChannel = 0
     private var numElements = 0
 
-    private val imageProcessor = ImageProcessor.Builder()
-        .add(NormalizeOp(INPUT_MEAN, INPUT_STANDARD_DEVIATION))
-        .add(CastOp(INPUT_IMAGE_TYPE))
-        .build()
+    private val INPUT_MEAN = 0f
+    private val INPUT_STANDARD_DEVIATION = 255f
 
-    init {
-        val compatList = CompatibilityList()
-
-        val options = Interpreter.Options().apply{
-            if(compatList.isDelegateSupportedOnThisDevice){
-                val delegateOptions = compatList.bestOptionsForThisDevice
-                this.addDelegate(GpuDelegate(delegateOptions))
-            } else {
-                this.setNumThreads(4)
-            }
-        }
-
-        val model = FileUtil.loadMappedFile(context, modelPath)
-        interpreter = Interpreter(model, options)
-
-        val inputShape = interpreter.getInputTensor(0)?.shape()
-        val outputShape = interpreter.getOutputTensor(0)?.shape()
-
-        if (inputShape != null) {
-            tensorWidth = inputShape[1]
-            tensorHeight = inputShape[2]
-
-            // If in case input shape is in format of [1, 3, ..., ...]
-            if (inputShape[1] == 3) {
-                tensorWidth = inputShape[2]
-                tensorHeight = inputShape[3]
-            }
-        }
-
-        if (outputShape != null) {
-            numChannel = outputShape[1]
-            numElements = outputShape[2]
-        }
-
-        try {
-            val inputStream: InputStream = context.assets.open(labelPath)
-            val reader = BufferedReader(InputStreamReader(inputStream))
-
-            var line: String? = reader.readLine()
-            while (line != null && line != "") {
-                labels.add(line)
-                line = reader.readLine()
-            }
-
-            reader.close()
-            inputStream.close()
-        } catch (e: IOException) {
-            e.printStackTrace()
-        }
-    }
-
-    fun restart(isGpu: Boolean) {
-        interpreter.close()
-
-        val options = if (isGpu) {
-            val compatList = CompatibilityList()
-            Interpreter.Options().apply{
-                if(compatList.isDelegateSupportedOnThisDevice){
-                    val delegateOptions = compatList.bestOptionsForThisDevice
-                    this.addDelegate(GpuDelegate(delegateOptions))
-                } else {
-                    this.setNumThreads(4)
-                }
-            }
-        } else {
-            Interpreter.Options().apply{
-                this.setNumThreads(4)
-            }
-        }
-
-        val model = FileUtil.loadMappedFile(context, modelPath)
-        interpreter = Interpreter(model, options)
-    }
-
-    fun close() {
-        interpreter.close()
-    }
-
-    fun detect(frame: Bitmap) {
-        if (tensorWidth == 0) return
-        if (tensorHeight == 0) return
-        if (numChannel == 0) return
-        if (numElements == 0) return
-
-        var inferenceTime = SystemClock.uptimeMillis()
-
-        val resizedBitmap = Bitmap.createScaledBitmap(frame, tensorWidth, tensorHeight, false)
-
-        val tensorImage = TensorImage(INPUT_IMAGE_TYPE)
-        tensorImage.load(resizedBitmap)
-        val processedImage = imageProcessor.process(tensorImage)
-        val imageBuffer = processedImage.buffer
-
-        val output = TensorBuffer.createFixedSize(intArrayOf(1, numChannel, numElements), OUTPUT_IMAGE_TYPE)
-        interpreter.run(imageBuffer, output.buffer)
-
-        val bestBoxes = bestBox(output.floatArray)
-        inferenceTime = SystemClock.uptimeMillis() - inferenceTime
-
-        if (bestBoxes == null) {
-            detectorListener.onEmptyDetect()
-            return
-        }
-
-        detectorListener.onDetect(bestBoxes, inferenceTime)
-    }
-
-    private fun bestBox(array: FloatArray) : List<BoundingBox>? {
-
-        val boundingBoxes = mutableListOf<BoundingBox>()
-
-        for (c in 0 until numElements) {
-            var maxConf = CONFIDENCE_THRESHOLD
-            var maxIdx = -1
-            var j = 4
-            var arrayIdx = c + numElements * j
-            while (j < numChannel){
-                if (array[arrayIdx] > maxConf) {
-                    maxConf = array[arrayIdx]
-                    maxIdx = j - 4
-                }
-                j++
-                arrayIdx += numElements
-            }
-
-            if (maxConf > CONFIDENCE_THRESHOLD) {
-                val clsName = labels[maxIdx]
-                val cx = array[c] // 0
-                val cy = array[c + numElements] // 1
-                val w = array[c + numElements * 2]
-                val h = array[c + numElements * 3]
-                val x1 = cx - (w/2F)
-                val y1 = cy - (h/2F)
-                val x2 = cx + (w/2F)
-                val y2 = cy + (h/2F)
-                if (x1 < 0F || x1 > 1F) continue
-                if (y1 < 0F || y1 > 1F) continue
-                if (x2 < 0F || x2 > 1F) continue
-                if (y2 < 0F || y2 > 1F) continue
-
-                boundingBoxes.add(
-                    BoundingBox(
-                        x1 = x1, y1 = y1, x2 = x2, y2 = y2,
-                        cx = cx, cy = cy, w = w, h = h,
-                        cnf = maxConf, cls = maxIdx, clsName = clsName
-                    )
-                )
-            }
-        }
-
-        if (boundingBoxes.isEmpty()) return null
-
-        return applyNMS(boundingBoxes)
-    }
-
-    private fun applyNMS(boxes: List<BoundingBox>) : MutableList<BoundingBox> {
-        val sortedBoxes = boxes.sortedByDescending { it.cnf }.toMutableList()
-        val selectedBoxes = mutableListOf<BoundingBox>()
-
-        while(sortedBoxes.isNotEmpty()) {
-            val first = sortedBoxes.first()
-            selectedBoxes.add(first)
-            sortedBoxes.remove(first)
-
-            val iterator = sortedBoxes.iterator()
-            while (iterator.hasNext()) {
-                val nextBox = iterator.next()
-                val iou = calculateIoU(first, nextBox)
-                if (iou >= IOU_THRESHOLD) {
-                    iterator.remove()
-                }
-            }
-        }
-
-        return selectedBoxes
-    }
-
-    private fun calculateIoU(box1: BoundingBox, box2: BoundingBox): Float {
-        val x1 = maxOf(box1.x1, box2.x1)
-        val y1 = maxOf(box1.y1, box2.y1)
-        val x2 = minOf(box1.x2, box2.x2)
-        val y2 = minOf(box1.y2, box2.y2)
-        val intersectionArea = maxOf(0F, x2 - x1) * maxOf(0F, y2 - y1)
-        val box1Area = box1.w * box1.h
-        val box2Area = box2.w * box2.h
-        return intersectionArea / (box1Area + box2Area - intersectionArea)
+    companion object {
+        private const val TAG = "Detector"
     }
 
     interface DetectorListener {
@@ -231,12 +38,263 @@ class Detector(
         fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long)
     }
 
-    companion object {
-        private const val INPUT_MEAN = 0f
-        private const val INPUT_STANDARD_DEVIATION = 255f
-        private val INPUT_IMAGE_TYPE = DataType.FLOAT32
-        private val OUTPUT_IMAGE_TYPE = DataType.FLOAT32
-        private const val CONFIDENCE_THRESHOLD = 0.3F
-        private const val IOU_THRESHOLD = 0.5F
+    init {
+        try {
+            setupInterpreter(useGpu = false) // Start with CPU by default for stability
+            setupLabels()
+            Log.d(TAG, "Detector initialized successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize detector", e)
+            throw e
+        }
+    }
+
+    private fun setupInterpreter(useGpu: Boolean = false) {
+        try {
+            val options = Interpreter.Options().apply {
+                setNumThreads(4)
+                setUseXNNPACK(true)
+            }
+
+            if (useGpu) {
+                val compatibilityList = CompatibilityList()
+                if (compatibilityList.isDelegateSupportedOnThisDevice) {
+                    try {
+                        gpuDelegate = GpuDelegate()
+                        options.addDelegate(gpuDelegate!!)
+                        Log.d(TAG, "GPU delegate added successfully")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to create GPU delegate, falling back to CPU", e)
+                        gpuDelegate?.close()
+                        gpuDelegate = null
+                    }
+                } else {
+                    Log.w(TAG, "GPU delegate not supported on this device")
+                }
+            }
+
+            val model = loadModelFile()
+            interpreter = Interpreter(model, options)
+
+            // Get input tensor dimensions
+            val inputShape = interpreter!!.getInputTensor(0).shape()
+            tensorHeight = inputShape[1]
+            tensorWidth = inputShape[2]
+            numChannel = if (inputShape.size > 3) inputShape[3] else 3
+            numElements = tensorHeight * tensorWidth * numChannel
+
+            Log.d(TAG, "Model input shape: ${inputShape.contentToString()}")
+            Log.d(TAG, "Tensor dimensions: ${tensorWidth}x${tensorHeight}x${numChannel}")
+
+            // Debug output tensor shape
+            val outputShape = interpreter!!.getOutputTensor(0).shape()
+            Log.d(TAG, "Model output shape: ${outputShape.contentToString()}")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting up interpreter", e)
+            cleanup()
+            throw e
+        }
+    }
+
+    private fun loadModelFile(): MappedByteBuffer {
+        return try {
+            FileUtil.loadMappedFile(context, modelPath)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading model file: $modelPath", e)
+            throw e
+        }
+    }
+
+    private fun setupLabels() {
+        try {
+            labels.clear()
+            val inputStream = context.assets.open(labelPath)
+            inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    val trimmed = line.trim()
+                    if (trimmed.isNotEmpty()) {
+                        labels.add(trimmed)
+                    }
+                }
+            }
+            Log.d(TAG, "Loaded ${labels.size} labels: $labels")
+
+            if (labels.isEmpty()) {
+                throw IllegalStateException("No labels found in $labelPath")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading labels from: $labelPath", e)
+            throw e
+        }
+    }
+
+    fun detect(bitmap: Bitmap) {
+        if (interpreter == null) {
+            Log.w(TAG, "Interpreter not initialized")
+            detectorListener.onEmptyDetect()
+            return
+        }
+
+        try {
+            val startTime = System.currentTimeMillis()
+
+            // Resize bitmap to model input size
+            val resizedBitmap = Bitmap.createScaledBitmap(bitmap, tensorWidth, tensorHeight, false)
+
+            // Prepare input tensor
+            val inputBuffer = convertBitmapToByteBuffer(resizedBitmap)
+
+            // Prepare output tensor
+            val outputShape = interpreter!!.getOutputTensor(0).shape()
+            val outputBuffer = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
+
+            // Run inference
+            interpreter!!.run(inputBuffer, outputBuffer)
+
+            val inferenceTime = System.currentTimeMillis() - startTime
+
+            // Debug output dimensions
+            Log.d(TAG, "Output buffer dimensions: ${outputBuffer.size} x ${outputBuffer[0].size} x ${outputBuffer[0][0].size}")
+
+            // Process results
+            val boundingBoxes = processOutput(outputBuffer[0], bitmap.width, bitmap.height)
+
+            if (boundingBoxes.isEmpty()) {
+                detectorListener.onEmptyDetect()
+            } else {
+                detectorListener.onDetect(boundingBoxes, inferenceTime)
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during detection", e)
+            detectorListener.onEmptyDetect()
+        }
+    }
+
+    private fun convertBitmapToByteBuffer(bitmap: Bitmap): Array<Array<Array<FloatArray>>> {
+        val inputBuffer = Array(1) { Array(tensorHeight) { Array(tensorWidth) { FloatArray(3) } } }
+
+        for (y in 0 until tensorHeight) {
+            for (x in 0 until tensorWidth) {
+                val pixel = bitmap.getPixel(x, y)
+
+                // Normalize pixel values
+                inputBuffer[0][y][x][0] = ((pixel shr 16 and 0xFF) - INPUT_MEAN) / INPUT_STANDARD_DEVIATION
+                inputBuffer[0][y][x][1] = ((pixel shr 8 and 0xFF) - INPUT_MEAN) / INPUT_STANDARD_DEVIATION
+                inputBuffer[0][y][x][2] = ((pixel and 0xFF) - INPUT_MEAN) / INPUT_STANDARD_DEVIATION
+            }
+        }
+
+        return inputBuffer
+    }
+
+    private fun processOutput(output: Array<FloatArray>, originalWidth: Int, originalHeight: Int): List<BoundingBox> {
+        val boundingBoxes = mutableListOf<BoundingBox>()
+
+        try {
+            Log.d(TAG, "Processing output with ${output.size} detections")
+
+            for (i in output.indices) {
+                val detection = output[i]
+                Log.d(TAG, "Detection $i: size=${detection.size}, values=${detection.take(10).toString()}...")
+
+                // Validate detection array size
+                if (detection.size < 5) {
+                    Log.w(TAG, "Detection $i has insufficient data: ${detection.size} elements")
+                    continue
+                }
+
+                val confidence = detection[4]
+                Log.d(TAG, "Detection $i confidence: $confidence")
+
+                if (confidence > 0.3f) { // Confidence threshold
+                    val centerX = detection[0] * originalWidth
+                    val centerY = detection[1] * originalHeight
+                    val width = detection[2] * originalWidth
+                    val height = detection[3] * originalHeight
+
+                    val left = centerX - width / 2
+                    val top = centerY - height / 2
+                    val right = centerX + width / 2
+                    val bottom = centerY + height / 2
+
+                    val classIndex = if (detection.size > 5) {
+                        // Multi-class: find class with highest probability
+                        var maxIndex = 5
+                        val maxSearchIndex = minOf(detection.size - 1, 5 + labels.size - 1)
+
+                        for (j in 6..maxSearchIndex) {
+                            if (j < detection.size && detection[j] > detection[maxIndex]) {
+                                maxIndex = j
+                            }
+                        }
+                        maxIndex - 5
+                    } else {
+                        0 // Single class
+                    }
+
+                    // Validate class index
+                    val safeClassIndex = if (classIndex >= 0 && classIndex < labels.size) {
+                        classIndex
+                    } else {
+                        Log.w(TAG, "Invalid class index: $classIndex, using 0")
+                        0
+                    }
+
+                    val className = if (safeClassIndex < labels.size) {
+                        labels[safeClassIndex]
+                    } else {
+                        "Unknown"
+                    }
+
+                    Log.d(TAG, "Adding bounding box: class=$className, confidence=$confidence")
+
+                    boundingBoxes.add(
+                        BoundingBox(
+                            x1 = left,
+                            y1 = top,
+                            x2 = right,
+                            y2 = bottom,
+                            cx = centerX,
+                            cy = centerY,
+                            w = width,
+                            h = height,
+                            cnf = confidence,
+                            cls = safeClassIndex,
+                            clsName = className
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing output", e)
+        }
+
+        Log.d(TAG, "Found ${boundingBoxes.size} valid detections")
+        return boundingBoxes
+    }
+
+    fun restart(isGpu: Boolean = false) {
+        try {
+            cleanup()
+            setupInterpreter(isGpu)
+            Log.d(TAG, "Detector restarted successfully with GPU: $isGpu")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error restarting detector", e)
+            throw e
+        }
+    }
+
+    private fun cleanup() {
+        interpreter?.close()
+        interpreter = null
+        gpuDelegate?.close()
+        gpuDelegate = null
+    }
+
+    fun close() {
+        cleanup()
+        Log.d(TAG, "Detector closed")
     }
 }
