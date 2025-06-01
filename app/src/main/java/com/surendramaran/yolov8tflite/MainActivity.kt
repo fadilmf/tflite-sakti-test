@@ -335,7 +335,10 @@ class MainActivity : AppCompatActivity(), Detector.DetectorListener {
                 Log.d("boundingBox", "Detection $index:")
                 Log.d("boundingBox", "  Class: ${box.clsName} (${box.cls})")
                 Log.d("boundingBox", "  Confidence: ${box.cnf}")
-                Log.d("boundingBox", "  Coordinates: x1=${box.x1}, y1=${box.y1}, x2=${box.x2}, y2=${box.y2}")
+                Log.d(
+                    "boundingBox",
+                    "  Coordinates: x1=${box.x1}, y1=${box.y1}, x2=${box.x2}, y2=${box.y2}"
+                )
                 Log.d("boundingBox", "  Center: cx=${box.cx}, cy=${box.cy}")
                 Log.d("boundingBox", "  Size: w=${box.w}, h=${box.h}")
                 Log.d("boundingBox", "  ----")
@@ -349,7 +352,11 @@ class MainActivity : AppCompatActivity(), Detector.DetectorListener {
             binding.progressBar.visibility = View.GONE
             Log.d(TAG, "Original image for Overlay: ${originalImageWidth}x${originalImageHeight}")
             for (box in boundingBoxes) {
-                Log.d(TAG, "  Overlay Input Box: Label=${box.clsName}, Coords=[${box.x1}, ${box.y1}, ${box.x2}, ${box.y2}]")
+                Log.d(
+                    TAG,
+                    "  Overlay Input Box: Label=${box.clsName}, Coords=[${box.x1}, ${box.y1}, ${box.x2}, ${box.y2}]"
+                )
+            }
         }
     }
 }

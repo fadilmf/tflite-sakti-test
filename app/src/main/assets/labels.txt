@@ -1,4 +1,1 @@
-fork
-knife
-plate
-spoon
+valiant

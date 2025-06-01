@@ -8,6 +8,8 @@ import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.FileUtil
 import java.io.FileInputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 
@@ -26,7 +28,6 @@ class Detector(
     private var numChannel = 0
     private var numElements = 0
 
-    private val INPUT_MEAN = 0f
     private val INPUT_STANDARD_DEVIATION = 255f
 
     companion object {
@@ -35,12 +36,17 @@ class Detector(
 
     interface DetectorListener {
         fun onEmptyDetect()
-        fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long, originalImageWidth: Int, originalImageHeight: Int)
+        fun onDetect(
+            boundingBoxes: List<BoundingBox>,
+            inferenceTime: Long,
+            originalImageWidth: Int,
+            originalImageHeight: Int
+        )
     }
 
     init {
         try {
-            setupInterpreter(useGpu = false) // Start with CPU by default for stability
+            setupInterpreter(useGpu = false)
             setupLabels()
             Log.d(TAG, "Detector initialized successfully")
         } catch (e: Exception) {
@@ -76,7 +82,7 @@ class Detector(
             val model = loadModelFile()
             interpreter = Interpreter(model, options)
 
-            // Get input tensor dimensions
+            // Dapatkan dimensi input
             val inputShape = interpreter!!.getInputTensor(0).shape()
             tensorHeight = inputShape[1]
             tensorWidth = inputShape[2]
@@ -84,11 +90,18 @@ class Detector(
             numElements = tensorHeight * tensorWidth * numChannel
 
             Log.d(TAG, "Model input shape: ${inputShape.contentToString()}")
-            Log.d(TAG, "Tensor dimensions: ${tensorWidth}x${tensorHeight}x${numChannel}")
+            Log.d(TAG, "Tensor dims: ${tensorWidth}x${tensorHeight}x${numChannel}")
 
-            // Debug output tensor shape
-            val outputShape = interpreter!!.getOutputTensor(0).shape()
-            Log.d(TAG, "Model output shape: ${outputShape.contentToString()}")
+            // Debug semua output tensor yang tersedia
+            val outputCount = interpreter!!.outputTensorCount
+            Log.d(TAG, "Total outputTensorCount = $outputCount")
+            for (i in 0 until outputCount) {
+                val outShape = interpreter!!.getOutputTensor(i).shape()
+                val outName  = interpreter!!.getOutputTensor(i).name()
+                Log.d(TAG, "Output tensor idx $i, name=$outName, shape=${outShape.contentToString()}")
+            }
+            // Asumsikan raw output ada di index 0: [1, 5, 22869]
+            // Jika ternyata ada lebih dari satu, silakan sesuaikan indexnya.
 
         } catch (e: Exception) {
             Log.e(TAG, "Error setting up interpreter", e)
@@ -118,11 +131,7 @@ class Detector(
                     }
                 }
             }
-            Log.d(TAG, "Loaded ${labels.size} labels: $labels")
-
-            if (labels.isEmpty()) {
-                throw IllegalStateException("No labels found in $labelPath")
-            }
+            Log.d(TAG, "Loaded ${labels.size} labels")
         } catch (e: Exception) {
             Log.e(TAG, "Error loading labels from: $labelPath", e)
             throw e
@@ -139,26 +148,24 @@ class Detector(
         try {
             val startTime = System.currentTimeMillis()
 
-            // Resize bitmap to model input size
+            // Resize + prepare input
             val resizedBitmap = Bitmap.createScaledBitmap(bitmap, tensorWidth, tensorHeight, false)
-
-            // Prepare input tensor
             val inputBuffer = convertBitmapToByteBuffer(resizedBitmap)
 
-            // Prepare output tensor
-            val outputShape = interpreter!!.getOutputTensor(0).shape()
-            val outputBuffer = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
+            // Output buffer: diasumsikan raw output di index 0, shape [1, 5, 22869]
+            val outShape = interpreter!!.getOutputTensor(0).shape()
+            // outShape = [1, 5, numPredictions]
+            val numPredictions = outShape[2]
+            val rawOutput = Array(1) { Array(outShape[1]) { FloatArray(numPredictions) } }
 
             // Run inference
-            interpreter!!.run(inputBuffer, outputBuffer)
+            interpreter!!.run(inputBuffer, rawOutput)
 
             val inferenceTime = System.currentTimeMillis() - startTime
+            Log.d(TAG, "Raw output dims: ${rawOutput.size} x ${rawOutput[0].size} x ${rawOutput[0][0].size}")
 
-            // Debug output dimensions
-            Log.d(TAG, "Output buffer dimensions: ${outputBuffer.size} x ${outputBuffer[0].size} x ${outputBuffer[0][0].size}")
-
-            // Process results
-            val boundingBoxes = processOutput(outputBuffer[0], bitmap.width, bitmap.height)
+            // Proses output raw menjadi bounding boxes
+            val boundingBoxes = processRawOutput(rawOutput[0], bitmap.width, bitmap.height)
 
             if (boundingBoxes.isEmpty()) {
                 detectorListener.onEmptyDetect()
@@ -172,121 +179,138 @@ class Detector(
         }
     }
 
-    private fun convertBitmapToByteBuffer(bitmap: Bitmap): Array<Array<Array<FloatArray>>> {
-        val inputBuffer = Array(1) { Array(tensorHeight) { Array(tensorWidth) { FloatArray(3) } } }
-
-        for (y in 0 until tensorHeight) {
-            for (x in 0 until tensorWidth) {
-                val pixel = bitmap.getPixel(x, y)
-
-                // Normalize pixel values
-                inputBuffer[0][y][x][0] = ((pixel shr 16 and 0xFF) - INPUT_MEAN) / INPUT_STANDARD_DEVIATION
-                inputBuffer[0][y][x][1] = ((pixel shr 8 and 0xFF) - INPUT_MEAN) / INPUT_STANDARD_DEVIATION
-                inputBuffer[0][y][x][2] = ((pixel and 0xFF) - INPUT_MEAN) / INPUT_STANDARD_DEVIATION
-            }
-        }
-
-        return inputBuffer
-    }
-
-    private fun processOutput(output: Array<FloatArray>, originalWidth: Int, originalHeight: Int): List<BoundingBox> {
-        val boundingBoxes = mutableListOf<BoundingBox>()
+    /**
+     * rawOut: Array<FloatArray> dengan dimensi [5][numPredictions],
+     * di mana index 0 = x_center_norm,
+     *       index 1 = y_center_norm,
+     *       index 2 = width_norm,
+     *       index 3 = height_norm,
+     *       index 4 = object_confidence (skalar per prediksi).
+     *
+     * originalWidth/Height: resolusi asli bitmap
+     */
+    private fun processRawOutput(
+        rawOut: Array<FloatArray>,
+        originalWidth: Int,
+        originalHeight: Int
+    ): List<BoundingBox> {
+        val candidates = mutableListOf<BoundingBox>()
+        val numPreds = rawOut[0].size
 
         try {
-            Log.d(TAG, "Processing output with ${output.size} detections")
+            Log.d(TAG, "Processing raw output with $numPreds predictions")
+            for (i in 0 until numPreds) {
+                val xNorm = rawOut[0][i]
+                val yNorm = rawOut[1][i]
+                val wNorm = rawOut[2][i]
+                val hNorm = rawOut[3][i]
+                val objConf = rawOut[4][i]
 
-            for (i in output.indices) {
-                val detection = output[i]
-                Log.d(TAG, "Detection $i: size=${detection.size}, values=${detection.take(10).toString()}...")
+                // Ubah ke pixel
+                val centerX = xNorm * originalWidth
+                val centerY = yNorm * originalHeight
+                val width = wNorm * originalWidth
+                val height = hNorm * originalHeight
 
-                // Validate detection array size
-                if (detection.size < 5) {
-                    Log.w(TAG, "Detection $i has insufficient data: ${detection.size} elements")
-                    continue
-                }
+                if (objConf <= 0.3f) continue  // threshold confidence
 
-                val confidence = detection[4]
-                Log.d(TAG, "Detection $i confidence: $confidence")
+                val left = centerX - width / 2f
+                val top = centerY - height / 2f
+                val right = centerX + width / 2f
+                val bottom = centerY + height / 2f
 
-                if (confidence > 0.3f) { // Confidence threshold
-                    val centerX = detection[0] * originalWidth
-                    val centerY = detection[1] * originalHeight
-                    val width = detection[2] * originalWidth
-                    val height = detection[3] * originalHeight
+                // Jika model memiliki multi‐class, rawOut akan memiliki lebih banyak baris.
+                // Contoh: rawOut[5 + j][i] = class j confidence.
+                // Tetapi dalam format [1,5,22869], baris sisanya tidak ada → kita asumsikan single‐class.
+                val classIndex = 0
+                val className = if (labels.isNotEmpty()) labels[0] else "Unknown"
 
-                    Log.d("boundingBox", "ini originalWidth: ${originalWidth} originalHeight: ${originalHeight}")
-                    Log.d("boundingBox", "ini width: ${width} height: ${height}")
-
-                    var left = centerX - originalWidth / 2
-                    var top = centerY - originalHeight / 2
-                    var right = centerX + originalWidth / 2
-                    var bottom = centerY + originalHeight / 2
-
-                    left = left.coerceIn(0f, originalWidth.toFloat())
-                    top = top.coerceIn(0f, originalHeight.toFloat())
-                    right = right.coerceIn(0f, originalWidth.toFloat())
-                    bottom = bottom.coerceIn(0f, originalHeight.toFloat())
-
-                    // Opsional: Jika setelah clipping, lebar atau tinggi menjadi <= 0, abaikan deteksi ini
-                    if (right <= left || bottom <= top) {
-                         Log.d(TAG, "Detection $i discarded after clipping (zero or negative size)")
-                        continue
-                    }
-
-                    val classIndex = if (detection.size > 5) {
-                        // Multi-class: find class with highest probability
-                        var maxIndex = 5
-                        val maxSearchIndex = minOf(detection.size - 1, 5 + labels.size - 1)
-
-                        for (j in 6..maxSearchIndex) {
-                            if (j < detection.size && detection[j] > detection[maxIndex]) {
-                                maxIndex = j
-                            }
-                        }
-                        maxIndex - 5
-                    } else {
-                        0 // Single class
-                    }
-
-                    // Validate class index
-                    val safeClassIndex = if (classIndex >= 0 && classIndex < labels.size) {
-                        classIndex
-                    } else {
-                        Log.w(TAG, "Invalid class index: $classIndex, using 0")
-                        0
-                    }
-
-                    val className = if (safeClassIndex < labels.size) {
-                        labels[safeClassIndex]
-                    } else {
-                        "Unknown"
-                    }
-
-                    Log.d(TAG, "Adding bounding box: class=$className, confidence=$confidence")
-
-                    boundingBoxes.add(
-                        BoundingBox(
-                            x1 = left,
-                            y1 = top,
-                            x2 = right,
-                            y2 = bottom,
-                            cx = centerX,
-                            cy = centerY,
-                            w = width,
-                            h = height,
-                            cnf = confidence,
-                            cls = safeClassIndex,
-                            clsName = className
-                        )
+                candidates.add(
+                    BoundingBox(
+                        x1 = left,
+                        y1 = top,
+                        x2 = right,
+                        y2 = bottom,
+                        cx = centerX,
+                        cy = centerY,
+                        w = width,
+                        h = height,
+                        cnf = objConf,
+                        cls = classIndex,
+                        clsName = className
                     )
+                )
+            }
+
+            // Jalankan NMS dan kembalikan maksimal 1 box
+            return nonMaxSuppression(candidates, iouThreshold = 0.5f, limit = 1)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing raw output", e)
+            return emptyList()
+        }
+    }
+
+    private fun nonMaxSuppression(
+        boxes: List<BoundingBox>,
+        iouThreshold: Float = 0.5f,
+        limit: Int = 1
+    ): List<BoundingBox> {
+        val selected = mutableListOf<BoundingBox>()
+        val sorted = boxes.sortedByDescending { it.cnf }.toMutableList()
+
+        while (sorted.isNotEmpty() && selected.size < limit) {
+            val best = sorted.removeAt(0)
+            selected.add(best)
+            val it = sorted.iterator()
+            while (it.hasNext()) {
+                val b = it.next()
+                if (iou(best, b) > iouThreshold) {
+                    it.remove()
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error processing output", e)
         }
+        return selected
+    }
 
-        Log.d(TAG, "Found ${boundingBoxes.size} valid detections")
-        return boundingBoxes
+    private fun iou(boxA: BoundingBox, boxB: BoundingBox): Float {
+        val x1 = maxOf(boxA.x1, boxB.x1)
+        val y1 = maxOf(boxA.y1, boxB.y1)
+        val x2 = minOf(boxA.x2, boxB.x2)
+        val y2 = minOf(boxA.y2, boxB.y2)
+
+        val interW = maxOf(0f, x2 - x1)
+        val interH = maxOf(0f, y2 - y1)
+        val interArea = interW * interH
+
+        val areaA = (boxA.x2 - boxA.x1) * (boxA.y2 - boxA.y1)
+        val areaB = (boxB.x2 - boxB.x1) * (boxB.y2 - boxB.y1)
+        val union = areaA + areaB - interArea
+
+        return if (union <= 0f) 0f else interArea / union
+    }
+
+    private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
+        val byteBuffer = ByteBuffer.allocateDirect(4 * tensorWidth * tensorHeight * numChannel)
+        byteBuffer.order(ByteOrder.nativeOrder())
+
+        val intValues = IntArray(tensorWidth * tensorHeight)
+        bitmap.getPixels(intValues, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+
+        var pixelIndex = 0
+        for (y in 0 until tensorHeight) {
+            for (x in 0 until tensorWidth) {
+                val pixel = intValues[pixelIndex++]
+                val r = ((pixel shr 16) and 0xFF).toFloat()
+                val g = ((pixel shr 8) and 0xFF).toFloat()
+                val b = (pixel and 0xFF).toFloat()
+
+                byteBuffer.putFloat(r / INPUT_STANDARD_DEVIATION)
+                byteBuffer.putFloat(g / INPUT_STANDARD_DEVIATION)
+                byteBuffer.putFloat(b / INPUT_STANDARD_DEVIATION)
+            }
+        }
+        return byteBuffer
     }
 
     fun restart(isGpu: Boolean = false) {
